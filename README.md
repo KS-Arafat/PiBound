@@ -1,6 +1,6 @@
-# Pi-hole + Unbound DNS Setup
+# Pi-hole + Unbound DNS over TLS Setup
 
-> A complete Docker Compose setup for a high-performance DNS server with ad-blocking and recursive resolution capabilities.
+> A Docker Compose setup for network-wide DNS filtering with encrypted upstream DNS-over-TLS (DoT) forwarding.
 
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
@@ -27,16 +27,15 @@
 A production-ready DNS infrastructure stack deployed on **Raspberry Pi** with secure HTTPS access. This project combines:
 
 - **Pi-hole**: Network-wide ad blocker and DNS management
-- **Unbound**: Recursive, validating DNS resolver with DNSSEC support
+- **Unbound**: Local DNS forwarder that sends upstream queries over DNS-over-TLS
 - **Caddy**: Reverse proxy providing secure HTTPS access to admin dashboard at `homelab.local`
 
-Perfect for home networks requiring robust DNS filtering, privacy-focused recursive resolution, and secure remote administration.
+The stack runs Pi-hole and Unbound in one custom container. Pi-hole accepts DNS requests from your network on port 53, then Unbound forwards them to Cloudflare and Quad9 over TLS on port 853. This can avoid ISP interception of ordinary outbound DNS on port 53; it is encrypted forwarding, not root-server recursion.
 
 ## Features
 
-- **Fast DNS Resolution**: Recursive resolution with Unbound
+- **Encrypted Upstream DNS**: Unbound forwards queries to Cloudflare and Quad9 over TLS (port 853)
 - **Ad Blocking**: Network-wide ad and tracker blocking with Pi-hole
-- **DNSSEC Validation**: Secure DNS with DNSSEC enabled
 - **Web Dashboard**: Pi-hole admin interface on port 8080
 - **HTTPS Support**: Caddy reverse proxy with automatic HTTPS
 - **Containerized**: Complete Docker Compose stack
@@ -54,21 +53,21 @@ Perfect for home networks requiring robust DNS filtering, privacy-focused recurs
 ┌──────────────▼──────────────────────────────────────────┐
 │              Pi-hole (DNS Sinkhole)                     │
 │  - Ad & Tracker Blocking                                │
-│  - Upstream: Unbound#53                                 │
+│  - Upstream: Unbound at 127.0.0.1#5335                 │
 │  - Admin Dashboard: https://homelab.local               │
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────┐
-│          Unbound (Recursive Resolver)                   │
-│  - DNSSEC Validation                                    │
-│  - Root Hints (Updated)                                 │
-│  - Custom Configuration                                 │
+│  Pi-hole + Unbound (one container)                      │
+│  - Local Unbound listener: 127.0.0.1:5335              │
+│  - DoT upstreams: Cloudflare and Quad9, port 853        │
+│  - Custom configuration                                 │
 └──────────────┬──────────────────────────────────────────┘
                │
-        ┌──────▼────────┐
-        │ Authoritative │
-        │   DNS Roots   │
-        └───────────────┘
+  ┌──────▼──────────────────────┐
+  │ Cloudflare / Quad9 over DoT  │
+  │          TCP 853            │
+  └─────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
 │           Caddy (Reverse Proxy)                          │
@@ -91,21 +90,23 @@ Perfect for home networks requiring robust DNS filtering, privacy-focused recurs
 
 1. **Install Docker & Docker Compose**:
 
-   ```bash
+```bash
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
    sudo usermod -aG docker $USER
    newgrp docker
-   
-   sudo apt-get install -y docker-compose
-   ```
+
+  sudo apt-get install -y docker-compose-plugin
+
+```
 
 2. **Verify Installation**:
 
-   ```bash
+```bash
    docker --version
-   docker-compose --version
-   ```
+  docker compose version
+
+ ```
 
 ### 1. Clone or Download the Repository
 
@@ -131,30 +132,23 @@ sed -i 's/Asia\\/Dhaka/Your\\/Timezone/g' docker-compose.yml
 ### 4. Start Services
 
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
-**Note:** Ensure the `unbound/root.hints` file exists. If it doesn't, download it using:
-
-```bash
-cd unbound
-bash roothints.sh
-cd ..
-```
+The `--build` option builds the combined Pi-hole/Unbound image from the repository's `Dockerfile`. Unbound forwards DNS over TLS to Cloudflare and Quad9; it does not perform root-server recursion. The network-facing DNS service still listens on port 53, while encrypted upstream connections use port 853. Ensure your network allows outbound TCP port 853.
 
 ### 5. Verify Services
 
 ```bash
-docker-compose ps
+docker compose ps
 ```
 
 Expected output:
 
 ```bash
-NAME               STATUS    PORTS
-unbound            Up        53/tcp, 53/udp
-pihole             Up        53/tcp, 53/udp, 0.0.0.0:8080->80/tcp
-caddy              Up        0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp
+NAME       STATUS    PORTS
+pibound    Up        0.0.0.0:53->53/tcp, 0.0.0.0:53->53/udp, 0.0.0.0:8080->80/tcp
+caddy-pb   Up        0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp
 ```
 
 ### 6. Access the Dashboard
@@ -198,30 +192,32 @@ https://homelab.local/admin
 **Key Settings:**
 
 - Set Pi-hole as your network's DNS server
-- Configure upstream DNS (already set to Unbound)
-- Enable DNSSEC validation
+- Leave Pi-hole's upstream DNS setting at `127.0.0.1#5335`; this is set by Compose
+- Unbound's configured DoT upstreams are Cloudflare and Quad9
 - Configure blocklists as needed
 
 ### Unbound Configuration
 
-Edit `unbound/unbound.conf` to customize DNS behavior:
+Edit `unbound/unbound-pihole.conf` to customize Unbound. The current configuration listens only inside the container and forwards all queries over TLS:
 
 ```ini
-# Key settings in unbound.conf
 server:
-    # Port for DNS queries
-    port: 53
-    
-    # Interface to listen on
-    interface: 0.0.0.0
-    
-    # DNSSEC validation
-    dnssec: yes
-    
-    # Hide server info
+    interface: 127.0.0.1
+    port: 5335
     hide-identity: yes
     hide-version: yes
+    tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
+
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: 1.1.1.1@853#cloudflare-dns.com
+    forward-addr: 1.0.0.1@853#cloudflare-dns.com
+    forward-addr: 9.9.9.9@853#dns.quad9.net
+    forward-addr: 149.112.112.112@853#dns.quad9.net
 ```
+
+Rebuild and restart the `pihole` service after changing this file: `docker compose up -d --build pihole`.
 
 ### Timezone Configuration
 
@@ -262,29 +258,27 @@ To use a custom domain, edit `homelab.local` to your domain name in the `Caddyfi
 **View logs:**
 
 ```bash
-docker-compose logs -f pihole
-docker-compose logs -f unbound
-docker-compose logs -f caddy
+docker compose logs -f pihole
+docker compose logs -f caddy
 ```
 
 **Restart services:**
 
 ```bash
-docker-compose restart pihole
-docker-compose restart unbound
+docker compose restart pihole
 ```
 
 **Stop all services:**
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 **Update images:**
 
 ```bash
-docker-compose pull
-docker-compose up -d
+docker compose pull
+docker compose up -d --build
 ```
 
 ### DNS Configuration on Clients
@@ -334,14 +328,15 @@ Properties > Use the following DNS server addresses:
 
 ## Services
 
-### Unbound
+### Pi-hole + Unbound
 
-- **Image**: `klutchell/unbound:latest`
-- **Port**: 53 (TCP/UDP)
-- **Features**: Recursive DNS, DNSSEC validation, root hints
-- **Config**: `unbound/unbound.conf`
-- **Root Hints**: `unbound/root.hints` (download using `roothints.sh`)
-- **Logging**: persisted to `./logs`
+- **Image**: Built locally from `Dockerfile`, based on `pihole/pihole:latest`
+- **Container**: `pibound` (Compose service: `pihole`)
+- **DNS for clients**: Port 53 TCP/UDP
+- **Pi-hole upstream**: Unbound at `127.0.0.1#5335`
+- **DoT upstreams**: Cloudflare and Quad9 on TCP port 853
+- **Unbound config**: `unbound/unbound-pihole.conf`
+- **Startup**: `entrypoint.sh` starts Unbound and Pi-hole in the same container
 
 ### Pi-hole
 
@@ -349,7 +344,7 @@ Properties > Use the following DNS server addresses:
 - **DNS Port**: 53 (TCP/UDP)
 - **Admin Dashboard**: Via Caddy HTTPS at `https://homelab.local/admin`
 - **Internal Port**: 8080 (proxied through Caddy)
-- **Upstream**: Unbound (port 53)
+- **Upstream**: Unbound in the same container (port 5335)
 - **Features**: Ad blocking, DNS management, query logs
 
 ### Caddy
@@ -365,12 +360,14 @@ Properties > Use the following DNS server addresses:
 ```bash
 .
 ├── Caddyfile              # Caddy reverse proxy configuration
-├── docker-compose.yml     # Docker Compose services definition
+├── docker-compose.yml     # Pi-hole/Unbound and Caddy services
+├── Dockerfile             # Builds the combined Pi-hole + Unbound image
+├── entrypoint.sh          # Starts both processes in the combined container
 ├── README.md              # This file
 ├── unbound/
-│   ├── unbound.conf       # Unbound DNS resolver configuration
-│   ├── root.hints         # Root DNS hints file
-│   └── roothints.sh       # Script to update root hints
+│   ├── unbound-pihole.conf # Unbound DoT forwarding configuration
+│   ├── root.hints         # Root hints bundled at image build time
+│   └── roothints.sh       # Root hints download script
 ├── pihole/
 │   ├── etc-pihole/        # Pi-hole configuration directory
 │   └── etc-dnsmasq.d/     # Dnsmasq configuration directory
@@ -382,29 +379,32 @@ Properties > Use the following DNS server addresses:
 ### Pi-hole won't start
 
 ```bash
-docker-compose logs pihole
+docker compose logs pihole
 # Check if port 53 is already in use
 sudo lsof -i :53
 ```
 
 ### DNS not resolving
 
-1. Verify Unbound is running: `docker-compose ps unbound`
-2. Check logs: `docker-compose logs unbound`
-3. Verify Pi-hole upstream DNS setting points to unbound:53
-4. Check firewall rules allow port 53
+1. Check both processes' container logs: `docker compose logs pihole`
+2. Verify Pi-hole's upstream is `127.0.0.1#5335`
+3. Check that outbound TCP port 853 is allowed by your router/firewall
+4. Confirm clients can reach the Pi-hole host on TCP and UDP port 53
 
-### Unbound DNSSEC failures
+### DoT upstream not resolving
 
 ```bash
-# Remove the old root.hints and restart Unbound
-rm unbound/root.hints
-docker-compose restart unbound
+# Check the merged service logs
+docker compose logs --tail=100 pihole
+# Check whether the host can reach a DoT upstream
+nc -vz 1.1.1.1 853
 ```
+
+If outbound port 853 is blocked, Unbound cannot reach its configured encrypted upstreams. The `root.hints` file does not provide fallback recursion in this forwarding configuration.
 
 ### High CPU/Memory usage
 
-- Reduce log verbosity in `unbound.conf`
+- Reduce log verbosity in `unbound/unbound-pihole.conf`
 - Check Pi-hole query logs for unusual traffic
 - Verify blocklists aren't too large
 
@@ -419,7 +419,7 @@ hostname -I
 
 **Cannot access homelab.local:**
 
-1. Ensure Caddy container is running: `docker-compose ps caddy`
+1. Ensure Caddy container is running: `docker compose ps caddy`
 2. Add entry to your hosts file:
 
    ```bash
@@ -456,6 +456,6 @@ Feel free to submit issues and enhancement requests!
 
 ---
 
-**Last Updated**: 2026-07-07  
+**Last Updated**: 2026-10-27
 **Tested On**: Raspberry Pi (Raspbian/Debian based systems)  
 **Deployment Model**: Docker Compose with HTTPS dashboard via Caddy
