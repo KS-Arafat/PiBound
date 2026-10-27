@@ -1,61 +1,26 @@
 services:
-  unbound:
-    user: "0:0"
-    container_name: unbound
-    image: klutchell/unbound:latest
-
-    volumes:
-      - ./unbound/unbound.conf:/etc/unbound/my.conf.d/unbound.conf
-      - ./unbound/root.hints:/etc/unbound/my.conf.d/root.hints
-      - ./logs:/var/log/unbound
-    command: ["-d", "-c", "/etc/unbound/my.conf.d/unbound.conf"]
-
-    restart: unless-stopped
-
-    networks:
-      dns_net:
-
   pihole:
-    container_name: pihole
-    image: pihole/pihole:latest
+    build: .
+    container_name: pibound
+    restart: unless-stopped
     ports:
       - "53:53/tcp"
       - "53:53/udp"
       - "8080:80/tcp"
     environment:
-      TZ: "Asia/Dhaka" # Change it to Your Timezone
+      TZ: "Asia/Dhaka"
+      FTLCONF_dns_upstreams: "127.0.0.1#5335"
       FTLCONF_dns_listeningMode: "all"
-      FTLCONF_DBINTERVAL: "0"
-      FTLCONF_dns_upstreams: "unbound#53"
     volumes:
       - ./pihole/etc-pihole/:/etc/pihole/
       - ./pihole/etc-dnsmasq.d/:/etc/dnsmasq.d/
-    tmpfs:
-      - /var/log/pihole
-    networks:
-      - dns_net
-    depends_on:
-      - unbound
-    restart: unless-stopped
 
   caddy:
-    container_name: caddy
+    container_name: caddy-pb
     image: caddy:latest
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - dns_net
     restart: unless-stopped
-
-networks:
-  dns_net:
-    driver: bridge
-
-volumes:
-  caddy_data:
-  caddy_config:
